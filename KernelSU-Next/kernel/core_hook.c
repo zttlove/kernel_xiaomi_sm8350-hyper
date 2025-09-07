@@ -1,4 +1,3 @@
-#include "ksu_compat.h"
 #include <linux/capability.h>
 #include <linux/cred.h>
 #include <linux/dcache.h>
