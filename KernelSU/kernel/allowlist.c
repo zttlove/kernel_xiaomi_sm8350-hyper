@@ -1,4 +1,3 @@
-#include <linux/capability.h>
 #include <linux/compiler.h>
 #include <linux/fs.h>
 #include <linux/gfp.h>
@@ -63,16 +62,14 @@ static void remove_uid_from_arr(uid_t uid)
 	kfree(temp_arr);
 }
 
-static void init_default_profiles(void)
+static void init_default_profiles()
 {
-	kernel_cap_t full_cap = CAP_FULL_SET;
-
 	default_root_profile.uid = 0;
 	default_root_profile.gid = 0;
 	default_root_profile.groups_count = 1;
 	default_root_profile.groups[0] = 0;
-	memcpy(&default_root_profile.capabilities.effective, &full_cap,
-		sizeof(default_root_profile.capabilities.effective));
+	memset(&default_root_profile.capabilities, 0xff,
+	       sizeof(default_root_profile.capabilities));
 	default_root_profile.namespaces = 0;
 	strcpy(default_root_profile.selinux_domain, KSU_DEFAULT_SELINUX_DOMAIN);
 
@@ -110,10 +107,9 @@ void ksu_show_allow_list(void)
 }
 
 #ifdef CONFIG_KSU_DEBUG
-static void ksu_grant_root_to_shell(void)
+static void ksu_grant_root_to_shell()
 {
 	struct app_profile profile = {
-		.version = KSU_APP_PROFILE_VER,
 		.allow_su = true,
 		.current_uid = 2000,
 	};
@@ -153,6 +149,11 @@ static inline bool forbid_system_uid(uid_t uid) {
 static bool profile_valid(struct app_profile *profile)
 {
 	if (!profile) {
+		return false;
+	}
+
+	if (forbid_system_uid(profile->current_uid)) {
+		pr_err("uid lower than 2000 is unsupported: %d\n", profile->current_uid);
 		return false;
 	}
 
@@ -266,7 +267,7 @@ bool __ksu_is_allow_uid(uid_t uid)
 
 	if (unlikely(uid == 0)) {
 		// already root, but only allow our domain.
-		return is_ksu_domain();
+		return ksu_is_ksu_domain();
 	}
 
 	if (forbid_system_uid(uid)) {
@@ -381,7 +382,7 @@ static void do_save_allow_list(struct work_struct *work)
 
 	list_for_each (pos, &allow_list) {
 		p = list_entry(pos, struct perm_data, list);
-		pr_info("save allow list, name: %s uid: %d, allow: %d\n",
+		pr_info("save allow list, name: %s uid :%d, allow: %d\n",
 			p->profile.key, p->profile.current_uid,
 			p->profile.allow_su);
 
