@@ -1,0 +1,20 @@
+--- kernel/selinux/selinux.c
++++ kernel/selinux/selinux.c
+@@ -71,7 +79,7 @@ void setenforce(bool enforce)
+ #endif
+ }
+ 
+-bool getenforce()
++bool ksu_getenforce()
+ {
+ #ifdef CONFIG_SECURITY_SELINUX_DISABLE
+ #ifdef KSU_COMPAT_USE_SELINUX_STATE
+@@ -107,7 +115,7 @@ static inline u32 current_sid(void)
+ }
+ #endif
+ 
+-bool is_ksu_domain()
++bool ksu_is_ksu_domain()
+ {
+ 	char *domain;
+ 	u32 seclen;
