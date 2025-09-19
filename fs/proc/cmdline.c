@@ -12,6 +12,7 @@ static int cmdline_proc_show(struct seq_file *m, void *v)
 {
 #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
 	if (!susfs_spoof_cmdline_or_bootconfig(m)) {
+		seq_putc(m, '\n');
 		return 0;
 	}
 #endif
