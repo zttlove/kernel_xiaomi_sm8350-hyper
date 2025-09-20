@@ -421,34 +421,13 @@ module_param_cb(ksu_debug_manager_uid, &expected_size_ops,
 bool ksu_is_manager_apk(char *path)
 {
 #ifdef CONFIG_KSU_SUSFS
-	return check_v2_signature(path, EXPECTED_SIZE, EXPECTED_HASH) ||
-		   check_v2_signature(path, 384, "7e0c6d7278a3bb8e364e0fcba95afaf3666cf5ff3c245a3b63c8833bd0445cc4");
-#else
-	return check_v2_signature(path, EXPECTED_SIZE, EXPECTED_HASH);
-#endif
-}
-
-bool is_dynamic_manager_apk(char *path, int *signature_index)
-{
-#ifdef CONFIG_KSU_SUSFS
-	// Check first signature
-	if (check_v2_signature(path, EXPECTED_SIZE, EXPECTED_HASH)) {
-		if (signature_index) *signature_index = 0;
+	// Try dynamic signature check first, then fallback to regular check
+	int signature_index;
+	if (check_v2_signature(path, true, &signature_index)) {
 		return true;
 	}
-	// Check second signature  
-	if (check_v2_signature(path, 384, "7e0c6d7278a3bb8e364e0fcba95afaf3666cf5ff3c245a3b63c8833bd0445cc4")) {
-		if (signature_index) *signature_index = 1;
-		return true;
-	}
-	return false;
+	return check_v2_signature(path, false, NULL);
 #else
-	return check_v2_signature(path, true, signature_index);
+	return check_v2_signature(path, false, NULL);
 #endif
-}
-
-// Backward compatibility wrapper
-bool is_manager_apk(char *path)
-{
-	return ksu_is_manager_apk(path);
 }
