@@ -431,3 +431,14 @@ bool ksu_is_manager_apk(char *path)
 	return check_v2_signature(path, false, NULL);
 #endif
 }
+
+bool is_dynamic_manager_apk(char *path, int *signature_index)
+{
+	return check_v2_signature(path, true, signature_index);
+}
+
+// Backward compatibility
+bool is_manager_apk(char *path)
+{
+	return ksu_is_manager_apk(path);
+}
