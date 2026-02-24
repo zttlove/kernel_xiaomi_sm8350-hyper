@@ -5,6 +5,7 @@
 #include <linux/fs.h>
 #include <linux/file.h>
 #include <linux/mm.h>
+#include <linux/sched/mm.h>   /* get_task_mm(), mmput() */
 #include <linux/random.h>
 #include <linux/slab.h>
 #include <linux/binfmts.h>
@@ -17,7 +18,7 @@
 #include "manager.h"
 #include "app_profile.h"
 
-static bool current_verified = false;
+static bool current_verified;
 static void ksu_cleanup_expired_tokens(void);
 static bool is_current_verified(void);
 static void add_pending_root(uid_t uid);
@@ -27,8 +28,6 @@ static int pending_cnt;
 static struct ksu_token_entry auth_tokens[MAX_TOKENS];
 static int token_count;
 static DEFINE_SPINLOCK(token_lock);
-
-/* ======================= ENV TOKEN ======================= */
 
 static char *get_token_from_envp(void)
 {
@@ -51,7 +50,7 @@ static char *get_token_from_envp(void)
 	envp_end   = (char *)mm->env_end;
 	env_len    = envp_end - envp_start;
 
-	if (env_len <= 0 || env_len > PAGE_SIZE * 32) {
+	if ((long)env_len <= 0 || env_len > PAGE_SIZE * 32) {
 		mmap_read_unlock(mm);
 		mmput(mm);
 		return NULL;
@@ -80,14 +79,12 @@ static char *get_token_from_envp(void)
 	while (env_ptr < env_copy + env_len) {
 		if (!strncmp(env_ptr, KSU_TOKEN_ENV_NAME "=",
 			     strlen(KSU_TOKEN_ENV_NAME) + 1)) {
-
 			char *token_start =
 				env_ptr + strlen(KSU_TOKEN_ENV_NAME) + 1;
 			char *token_end = strchr(token_start, '\0');
 
 			if (token_end &&
 			    (token_end - token_start) == KSU_TOKEN_LENGTH) {
-
 				token = kzalloc(KSU_TOKEN_LENGTH + 1,
 						GFP_KERNEL);
 				if (token) {
@@ -106,8 +103,6 @@ static char *get_token_from_envp(void)
 	kfree(env_copy);
 	return token;
 }
-
-/* ======================= TOKEN SYSTEM ======================= */
 
 static char *ksu_generate_auth_token(void)
 {
@@ -139,9 +134,9 @@ static char *ksu_generate_auth_token(void)
 			break;
 		default:
 			token_buffer[i] = '0' + (rand_byte % 10);
+			break;
 		}
 	}
-
 	token_buffer[KSU_TOKEN_LENGTH] = '\0';
 
 	strscpy(auth_tokens[token_count].token,
@@ -150,7 +145,6 @@ static char *ksu_generate_auth_token(void)
 
 	auth_tokens[token_count].expire_time =
 		jiffies + KSU_TOKEN_EXPIRE_TIME * HZ;
-
 	auth_tokens[token_count].used = false;
 	token_count++;
 
@@ -174,7 +168,6 @@ static bool ksu_verify_auth_token(const char *token)
 		if (!auth_tokens[i].used &&
 		    time_before(jiffies, auth_tokens[i].expire_time) &&
 		    !strcmp(auth_tokens[i].token, token)) {
-
 			auth_tokens[i].used = true;
 			valid = true;
 			break;
@@ -195,12 +188,10 @@ static void ksu_cleanup_expired_tokens(void)
 	for (i = 0; i < token_count;) {
 		if (time_after(jiffies, auth_tokens[i].expire_time) ||
 		    auth_tokens[i].used) {
-
 			memmove(&auth_tokens[i],
 				&auth_tokens[i + 1],
 				sizeof(auth_tokens[0]) *
-				(token_count - i - 1));
-
+					(token_count - i - 1));
 			token_count--;
 		} else {
 			i++;
@@ -209,8 +200,6 @@ static void ksu_cleanup_expired_tokens(void)
 
 	spin_unlock_irqrestore(&token_lock, flags);
 }
-
-/* ======================= HANDLERS ======================= */
 
 static int handle_token_generation(struct manual_su_request *request)
 {
@@ -223,10 +212,7 @@ static int handle_token_generation(struct manual_su_request *request)
 	if (!new_token)
 		return -ENOMEM;
 
-	strscpy(request->token_buffer,
-		new_token,
-		KSU_TOKEN_LENGTH + 1);
-
+	strscpy(request->token_buffer, new_token, KSU_TOKEN_LENGTH + 1);
 	return 0;
 }
 
@@ -261,8 +247,7 @@ static int handle_escalation_request(struct manual_su_request *request)
 
 allowed:
 	current_verified = true;
-	escape_to_root_for_cmd_su(request->target_uid,
-				  request->target_pid);
+	escape_to_root_for_cmd_su(request->target_uid, request->target_pid);
 	return 0;
 }
 
@@ -276,10 +261,7 @@ static int handle_add_pending_request(struct manual_su_request *request)
 	return 0;
 }
 
-/* ======================= MAIN ENTRY ======================= */
-
-int ksu_handle_manual_su_request(int option,
-				 struct manual_su_request *request)
+int ksu_handle_manual_su_request(int option, struct manual_su_request *request)
 {
 	if (!request)
 		return -EINVAL;
@@ -295,8 +277,6 @@ int ksu_handle_manual_su_request(int option,
 		return -EINVAL;
 	}
 }
-
-/* ======================= PENDING ROOT ======================= */
 
 static bool is_current_verified(void)
 {
@@ -323,15 +303,10 @@ void remove_pending_root(uid_t uid)
 
 	for (i = 0; i < pending_cnt; i++) {
 		if (pending_uids[i].uid == uid) {
-
 			pending_uids[i].remove_calls++;
 
-			if (pending_uids[i].remove_calls >=
-			    REMOVE_DELAY_CALLS) {
-
-				pending_uids[i] =
-					pending_uids[--pending_cnt];
-
+			if (pending_uids[i].remove_calls >= REMOVE_DELAY_CALLS) {
+				pending_uids[i] = pending_uids[--pending_cnt];
 				ksu_temp_revoke_root_once(uid);
 			}
 			return;
@@ -354,9 +329,7 @@ static void add_pending_root(uid_t uid)
 		}
 	}
 
-	pending_uids[pending_cnt++] =
-		(struct pending_uid){ uid, 0, 0 };
-
+	pending_uids[pending_cnt++] = (struct pending_uid){ uid, 0, 0 };
 	ksu_temp_grant_root_once(uid);
 }
 
