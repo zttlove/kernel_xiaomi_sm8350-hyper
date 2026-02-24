@@ -3,18 +3,47 @@
 
 #include <linux/fs.h>
 #include <linux/version.h>
-#include <linux/task_work.h>
+#include <linux/cred.h>
 #include "ss/policydb.h"
 #include "linux/key.h"
+
+/**
+ * list_count_nodes - count the number of nodes in a list
+ * @head: the head of the list
+ *
+ * This function iterates over the list starting from @head and counts
+ * the number of nodes in the list. It does not modify the list.
+ *
+ * Context: Any context. The function is safe to call in any context,
+ *          including interrupt context, as it does not sleep or allocate
+ *          memory.
+ *
+ * Return: the number of nodes in the list (excluding the head)
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
+static inline __maybe_unused size_t list_count_nodes(const struct list_head *head)
+{
+    const struct list_head *pos;
+    size_t count = 0;
+
+    if (!head)
+        return 0;
+
+    list_for_each(pos, head)
+        count++;
+
+	return count;
+}
+#endif
 
 /*
  * Adapt to Huawei HISI kernel without affecting other kernels ,
  * Huawei Hisi Kernel EBITMAP Enable or Disable Flag ,
  * From ss/ebitmap.h
  */
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 9, 0)) &&                         \
-		(LINUX_VERSION_CODE < KERNEL_VERSION(4, 10, 0)) ||             \
-	(LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0)) &&                    \
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 9, 0)) &&             \
+		(LINUX_VERSION_CODE < KERNEL_VERSION(4, 10, 0)) || \
+	(LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0)) &&        \
 		(LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0))
 #ifdef HISI_SELINUX_EBITMAP_RO
 #define CONFIG_IS_HW_HISI
@@ -31,40 +60,22 @@
 extern long ksu_strncpy_from_user_nofault(char *dst,
 					  const void __user *unsafe_addr,
 					  long count);
+extern long ksu_strncpy_from_user_retry(char *dst,
+					const void __user *unsafe_addr,
+					long count);
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 10, 0) || \
+	defined(CONFIG_IS_HW_HISI) || defined(CONFIG_KSU_ALLOWLIST_WORKAROUND)
+extern struct key *init_session_keyring;
+#endif
+
+extern void ksu_android_ns_fs_check(void);
+extern int ksu_access_ok(const void *addr, unsigned long size);
 extern struct file *ksu_filp_open_compat(const char *filename, int flags,
 					 umode_t mode);
 extern ssize_t ksu_kernel_read_compat(struct file *p, void *buf, size_t count,
 				      loff_t *pos);
 extern ssize_t ksu_kernel_write_compat(struct file *p, const void *buf,
 				       size_t count, loff_t *pos);
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 10, 0) ||                           \
-	defined(CONFIG_IS_HW_HISI) || defined(CONFIG_KSU_ALLOWLIST_WORKAROUND)
-extern struct key *init_session_keyring;
-#endif
-
-extern int do_close_fd(unsigned int fd);
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
-extern void *ksu_compat_kvrealloc(const void *p, size_t oldsize, size_t newsize,
-				  gfp_t flags);
-#endif
-
-#ifndef VERIFY_READ
-#define ksu_access_ok(addr, size) access_ok(addr, size)
-#else
-#define ksu_access_ok(addr, size) access_ok(VERIFY_READ, addr, size)
-#endif
-
-// Linux >= 5.7
-// task_work_add (struct, struct, enum)
-// Linux pre-5.7
-// task_work_add (struct, struct, bool)
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 7, 0)
-#ifndef TWA_RESUME
-#define TWA_RESUME true
-#endif
-#endif
 
 #endif

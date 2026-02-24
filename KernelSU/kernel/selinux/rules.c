@@ -6,13 +6,16 @@
 #include "selinux.h"
 #include "sepolicy.h"
 #include "ss/services.h"
-#include "linux/lsm_audit.h" // IWYU pragma: keep
+#include "linux/lsm_audit.h"
 #include "xfrm.h"
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
 #define SELINUX_POLICY_INSTEAD_SELINUX_SS
 #endif
 
+#define KERNEL_SU_DOMAIN "su"
+#define KERNEL_SU_FILE "ksu_file"
+#define KERNEL_EXEC_TYPE "ksu_exec"
 #define ALL NULL
 
 static struct policydb *get_policydb(void)
@@ -34,11 +37,11 @@ static struct policydb *get_policydb(void)
 }
 
 static DEFINE_MUTEX(ksu_rules);
-void apply_kernelsu_rules(void)
+void ksu_apply_kernelsu_rules(void)
 {
 	struct policydb *db;
 
-	if (!getenforce()) {
+	if (!ksu_getenforce()) {
 		pr_info("SELinux permissive or disabled, apply rules!\n");
 	}
 
@@ -51,55 +54,15 @@ void apply_kernelsu_rules(void)
 	ksu_typeattribute(db, KERNEL_SU_DOMAIN, "netdomain");
 	ksu_typeattribute(db, KERNEL_SU_DOMAIN, "bluetoothdomain");
 
-	// KernelSU file type - restricted access
+	// Create unconstrained file type
 	ksu_type(db, KERNEL_SU_FILE, "file_type");
 	ksu_typeattribute(db, KERNEL_SU_FILE, "mlstrustedobject");
-	// Only allow trusted domains to access KernelSU files
-	ksu_allow(db, KERNEL_SU_DOMAIN, KERNEL_SU_FILE, ALL, ALL);
-	ksu_allow(db, "init", KERNEL_SU_FILE, ALL, ALL);
-	ksu_allow(db, "zygote", KERNEL_SU_FILE, ALL, ALL);
-	
-	// Zygote permissions for Zygisk - using stock types only
-	ksu_allow(db, "zygote", "adb_data_file", "dir", "search");
-	ksu_allow(db, "zygote", "adb_data_file", "dir", "read");
-	ksu_allow(db, "zygote", "adb_data_file", "dir", "open");
-	ksu_allow(db, "zygote", "adb_data_file", "file", "read");
-	ksu_allow(db, "zygote", "adb_data_file", "file", "open");
-	ksu_allow(db, "zygote", "adb_data_file", "file", "execute");
-	ksu_allow(db, "zygote", "adb_data_file", "file", "execute_no_trans");
-	ksu_allow(db, "zygote", "adb_data_file", "file", "map");
-	ksu_allow(db, "zygote", "adb_data_file", "file", "getattr");
-	
-	// Allow zygote to execute system libraries (for module loading)
-	ksu_allow(db, "zygote", "system_file", "file", "execute");
-	ksu_allow(db, "zygote", "system_file", "file", "execute_no_trans");
-	ksu_allow(db, "zygote", "system_file", "file", "map");
-	
-	// Zygote ptrace capabilities (for injection)
-	ksu_allow(db, "zygote", "zygote", "capability", "sys_ptrace");
-	ksu_allow(db, "zygote", "zygote", "process", "ptrace");
-	
-	// Allow zygote to interact with KernelSU domain
-	ksu_allow(db, "zygote", KERNEL_SU_DOMAIN, "file", "read");
-	ksu_allow(db, "zygote", KERNEL_SU_DOMAIN, "file", "open");
-	ksu_allow(db, "zygote", KERNEL_SU_DOMAIN, "dir", "search");
-	ksu_allow(db, "zygote", KERNEL_SU_DOMAIN, "dir", "read");
-	ksu_allow(db, "zygote", KERNEL_SU_DOMAIN, "fd", "use");
-	ksu_allow(db, "zygote", KERNEL_SU_DOMAIN, "unix_stream_socket", "connectto");
-	ksu_allow(db, "zygote", KERNEL_SU_DOMAIN, "unix_stream_socket", "read");
-	ksu_allow(db, "zygote", KERNEL_SU_DOMAIN, "unix_stream_socket", "write");
-	
-	// Memfd/tmpfs for module loading
-	ksu_allow(db, "zygote", "zygote", "capability", "ipc_lock");
-	ksu_allow(db, "zygote", "tmpfs", "file", "read");
-	ksu_allow(db, "zygote", "tmpfs", "file", "write");
-	ksu_allow(db, "zygote", "tmpfs", "file", "execute");
-	ksu_allow(db, "zygote", "tmpfs", "file", "map");
+	ksu_allow(db, ALL, KERNEL_SU_FILE, ALL, ALL);
 
-	// KernelSU domain full permissions
+	// allow all!
 	ksu_allow(db, KERNEL_SU_DOMAIN, ALL, ALL, ALL);
 
-	// ioctl permissions
+	// allow us do any ioctl
 	if (db->policyvers >= POLICYDB_VERSION_XPERMS_IOCTL) {
 		ksu_allowxperm(db, KERNEL_SU_DOMAIN, ALL, "blk_file", ALL);
 		ksu_allowxperm(db, KERNEL_SU_DOMAIN, ALL, "fifo_file", ALL);
@@ -107,27 +70,36 @@ void apply_kernelsu_rules(void)
 		ksu_allowxperm(db, KERNEL_SU_DOMAIN, ALL, "file", ALL);
 	}
 
-	// Init can trigger ksud
+	// we need to save allowlist in /data/adb/ksu
+	ksu_allow(db, "kernel", "adb_data_file", "dir", ALL);
+	ksu_allow(db, "kernel", "adb_data_file", "file", ALL);
+	// we need to search /data/app
+	ksu_allow(db, "kernel", "apk_data_file", "file", "open");
+	ksu_allow(db, "kernel", "apk_data_file", "dir", "open");
+	ksu_allow(db, "kernel", "apk_data_file", "dir", "read");
+	ksu_allow(db, "kernel", "apk_data_file", "dir", "search");
+	// we may need to do mount on shell
+	ksu_allow(db, "kernel", "shell_data_file", "file", ALL);
+	// we need to read /data/system/packages.list
+	ksu_allow(db, "kernel", "kernel", "capability", "dac_override");
+	// Android 10+:
+	// http://aospxref.com/android-12.0.0_r3/xref/system/sepolicy/private/file_contexts#512
+	ksu_allow(db, "kernel", "packages_list_file", "file", ALL);
+	// Kernel 4.4
+	ksu_allow(db, "kernel", "packages_list_file", "dir", ALL);
+	// Android 9-:
+	// http://aospxref.com/android-9.0.0_r61/xref/system/sepolicy/private/file_contexts#360
+	ksu_allow(db, "kernel", "system_data_file", "file", ALL);
+	ksu_allow(db, "kernel", "system_data_file", "dir", ALL);
+	// our ksud triggered by init
+	ksu_allow(db, "init", "adb_data_file", "file", ALL);
+	ksu_allow(db, "init", "adb_data_file", "dir", ALL); // #1289
 	ksu_allow(db, "init", KERNEL_SU_DOMAIN, ALL, ALL);
 
-	
-	// Kernel domain - specific permissions only
-	ksu_allow(db, "kernel", "adb_data_file", "dir", "search");
-	ksu_allow(db, "kernel", "adb_data_file", "dir", "read");
-	ksu_allow(db, "kernel", "adb_data_file", "dir", "open");
-	ksu_allow(db, "kernel", "adb_data_file", "file", "read");
-	ksu_allow(db, "kernel", "adb_data_file", "file", "open");
-	ksu_allow(db, "kernel", "adb_data_file", "file", "execute");
-	ksu_allow(db, "kernel", "adb_data_file", "file", "execute_no_trans");
-	ksu_allow(db, "kernel", "adb_data_file", "file", "getattr");
-	ksu_allow(db, "kernel", "system_file", "file", "execute");
-	ksu_allow(db, "kernel", "system_file", "file", "execute_no_trans");
-	ksu_allow(db, "kernel", "toolbox_exec", "file", "execute");
-	ksu_allow(db, "kernel", "toolbox_exec", "file", "execute_no_trans");
-	ksu_allow(db, "kernel", "kernel", "capability", "dac_override");
-	ksu_allow(db, "kernel", "kernel", "capability", "dac_read_search");
-	
-	// Magisk-style rules for compatibility
+	// we need to umount modules in zygote
+	ksu_allow(db, "zygote", "adb_data_file", "dir", "search");
+
+	// copied from Magisk rules
 	// suRights
 	ksu_allow(db, "servicemanager", KERNEL_SU_DOMAIN, "dir", "search");
 	ksu_allow(db, "servicemanager", KERNEL_SU_DOMAIN, "dir", "read");
@@ -153,7 +125,12 @@ void apply_kernelsu_rules(void)
 	ksu_allow(db, "hwservicemanager", KERNEL_SU_DOMAIN, "dir", "search");
 	ksu_allow(db, "hwservicemanager", KERNEL_SU_DOMAIN, "file", "read");
 	ksu_allow(db, "hwservicemanager", KERNEL_SU_DOMAIN, "file", "open");
-	ksu_allow(db, "hwservicemanager", KERNEL_SU_DOMAIN, "process", "getattr");
+	ksu_allow(db, "hwservicemanager", KERNEL_SU_DOMAIN, "process",
+		  "getattr");
+
+	// For mounting loop devices, mirrors, tmpfs
+	ksu_allow(db, "kernel", ALL, "file", "read");
+	ksu_allow(db, "kernel", ALL, "file", "write");
 
 	// Allow all binder transactions
 	ksu_allow(db, ALL, KERNEL_SU_DOMAIN, "binder", ALL);
@@ -162,12 +139,16 @@ void apply_kernelsu_rules(void)
 	ksu_allow(db, "system_server", KERNEL_SU_DOMAIN, "process", "getpgid");
 	ksu_allow(db, "system_server", KERNEL_SU_DOMAIN, "process", "sigkill");
 
+	// https://android-review.googlesource.com/c/platform/system/logging/+/3725346
+	ksu_dontaudit(db, "untrusted_app", KERNEL_SU_DOMAIN, "dir", "getattr");
+	
 #ifdef CONFIG_KSU_SUSFS
-	susfs_set_priv_app_sid();
+	// Allow umount in zygote process without installing zygisk
+	ksu_allow(db, "zygote", "labeledfs", "filesystem", "unmount");
 	susfs_set_init_sid();
 	susfs_set_ksu_sid();
 	susfs_set_zygote_sid();
-#endif // #ifdef CONFIG_KSU_SUSFS
+#endif
 
 	mutex_unlock(&ksu_rules);
 }
@@ -184,16 +165,39 @@ void apply_kernelsu_rules(void)
 #define CMD_TYPE_CHANGE 8
 #define CMD_GENFSCON 9
 
+// keep it!
+extern bool ksu_is_compat __read_mostly;
+
+// armv7l kernel compat
+#ifdef CONFIG_64BIT
+#define usize u64
+#else
+#define usize u32
+#endif
+
 struct sepol_data {
 	u32 cmd;
 	u32 subcmd;
-	u64 sepol1;
-	u64 sepol2;
-	u64 sepol3;
-	u64 sepol4;
-	u64 sepol5;
-	u64 sepol6;
-	u64 sepol7;
+	usize field_sepol1;
+	usize field_sepol2;
+	usize field_sepol3;
+	usize field_sepol4;
+	usize field_sepol5;
+	usize field_sepol6;
+	usize field_sepol7;
+};
+
+// ksud 32-bit on arm64 kernel
+struct __maybe_unused sepol_data_compat {
+	u32 cmd;
+	u32 subcmd;
+	u32 field_sepol1;
+	u32 field_sepol2;
+	u32 field_sepol3;
+	u32 field_sepol4;
+	u32 field_sepol5;
+	u32 field_sepol6;
+	u32 field_sepol7;
 };
 
 static int get_object(char *buf, char __user *user_object, size_t buf_sz,
@@ -205,7 +209,7 @@ static int get_object(char *buf, char __user *user_object, size_t buf_sz,
 	}
 
 	if (strncpy_from_user(buf, user_object, buf_sz) < 0) {
-		return -EINVAL;
+		return -1;
 	}
 
 	*object = buf;
@@ -213,16 +217,10 @@ static int get_object(char *buf, char __user *user_object, size_t buf_sz,
 	return 0;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0) ||                           \
-	!defined(KSU_COMPAT_USE_SELINUX_STATE)
-extern int avc_ss_reset(u32 seqno);
-#else
-extern int avc_ss_reset(struct selinux_avc *avc, u32 seqno);
-#endif
 // reset avc cache table, otherwise the new rules will not take effect if already denied
 static void reset_avc_cache(void)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0) ||                           \
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0) || \
 	!defined(KSU_COMPAT_USE_SELINUX_STATE)
 	avc_ss_reset(0);
 	selnl_notify_policyload(0);
@@ -236,66 +234,89 @@ static void reset_avc_cache(void)
 	selinux_xfrm_notify_policyload();
 }
 
-int handle_sepolicy(unsigned long arg3, void __user *arg4)
+int ksu_handle_sepolicy(unsigned long arg3, void __user *arg4)
 {
 	struct policydb *db;
 
 	if (!arg4) {
-		return -EINVAL;
+		return -1;
 	}
 
-	if (!getenforce()) {
+	if (!ksu_getenforce()) {
 		pr_info("SELinux permissive or disabled when handle policy!\n");
 	}
 
-	struct sepol_data data;
-	if (copy_from_user(&data, arg4, sizeof(struct sepol_data))) {
-		pr_err("sepol: copy sepol_data failed.\n");
-		return -EINVAL;
-	}
+	u32 cmd, subcmd;
+	char __user *sepol1, *sepol2, *sepol3, *sepol4, *sepol5, *sepol6,
+		*sepol7;
 
-	u32 cmd = data.cmd;
-	u32 subcmd = data.subcmd;
+	if (unlikely(ksu_is_compat)) {
+		struct sepol_data_compat data_compat;
+		if (copy_from_user(&data_compat, arg4,
+				   sizeof(struct sepol_data_compat))) {
+			pr_err("sepol: copy sepol_data failed.\n");
+			return -1;
+		}
+		pr_info("sepol: running in compat mode!\n");
+		sepol1 = compat_ptr(data_compat.field_sepol1);
+		sepol2 = compat_ptr(data_compat.field_sepol2);
+		sepol3 = compat_ptr(data_compat.field_sepol3);
+		sepol4 = compat_ptr(data_compat.field_sepol4);
+		sepol5 = compat_ptr(data_compat.field_sepol5);
+		sepol6 = compat_ptr(data_compat.field_sepol6);
+		sepol7 = compat_ptr(data_compat.field_sepol7);
+		cmd = data_compat.cmd;
+		subcmd = data_compat.subcmd;
+	} else {
+		struct sepol_data data;
+		if (copy_from_user(&data, arg4, sizeof(struct sepol_data))) {
+			pr_err("sepol: copy sepol_data failed.\n");
+			return -1;
+		}
+		sepol1 = data.field_sepol1;
+		sepol2 = data.field_sepol2;
+		sepol3 = data.field_sepol3;
+		sepol4 = data.field_sepol4;
+		sepol5 = data.field_sepol5;
+		sepol6 = data.field_sepol6;
+		sepol7 = data.field_sepol7;
+		cmd = data.cmd;
+		subcmd = data.subcmd;
+	}
 
 	mutex_lock(&ksu_rules);
 
 	db = get_policydb();
 
-	int ret = -EINVAL;
-	switch (cmd) {
-	case CMD_NORMAL_PERM: {
+	int ret = -1;
+	if (cmd == CMD_NORMAL_PERM) {
 		char src_buf[MAX_SEPOL_LEN];
 		char tgt_buf[MAX_SEPOL_LEN];
 		char cls_buf[MAX_SEPOL_LEN];
 		char perm_buf[MAX_SEPOL_LEN];
 
 		char *s, *t, *c, *p;
-		if (get_object(src_buf, (void __user *)data.sepol1,
-			       sizeof(src_buf), &s) < 0) {
+		if (get_object(src_buf, sepol1, sizeof(src_buf), &s) < 0) {
 			pr_err("sepol: copy src failed.\n");
 			goto exit;
 		}
 
-		if (get_object(tgt_buf, (void __user *)data.sepol2,
-			       sizeof(tgt_buf), &t) < 0) {
+		if (get_object(tgt_buf, sepol2, sizeof(tgt_buf), &t) < 0) {
 			pr_err("sepol: copy tgt failed.\n");
 			goto exit;
 		}
 
-		if (get_object(cls_buf, (void __user *)data.sepol3,
-			       sizeof(cls_buf), &c) < 0) {
+		if (get_object(cls_buf, sepol3, sizeof(cls_buf), &c) < 0) {
 			pr_err("sepol: copy cls failed.\n");
 			goto exit;
 		}
 
-		if (get_object(perm_buf, (void __user *)data.sepol4,
-			       sizeof(perm_buf), &p) < 0) {
+		if (get_object(perm_buf, sepol4, sizeof(perm_buf), &p) < 0) {
 			pr_err("sepol: copy perm failed.\n");
 			goto exit;
 		}
 
 		bool success = false;
-
 		if (subcmd == 1) {
 			success = ksu_allow(db, s, t, c, p);
 		} else if (subcmd == 2) {
@@ -307,10 +328,9 @@ int handle_sepolicy(unsigned long arg3, void __user *arg4)
 		} else {
 			pr_err("sepol: unknown subcmd: %d\n", subcmd);
 		}
-		ret = success ? 0 : -EINVAL;
-		break;
-	}
-	case CMD_XPERM: {
+		ret = success ? 0 : -1;
+
+	} else if (cmd == CMD_XPERM) {
 		char src_buf[MAX_SEPOL_LEN];
 		char tgt_buf[MAX_SEPOL_LEN];
 		char cls_buf[MAX_SEPOL_LEN];
@@ -320,28 +340,24 @@ int handle_sepolicy(unsigned long arg3, void __user *arg4)
 		char perm_set[MAX_SEPOL_LEN];
 
 		char *s, *t, *c;
-		if (get_object(src_buf, (void __user *)data.sepol1,
-			       sizeof(src_buf), &s) < 0) {
+		if (get_object(src_buf, sepol1, sizeof(src_buf), &s) < 0) {
 			pr_err("sepol: copy src failed.\n");
 			goto exit;
 		}
-		if (get_object(tgt_buf, (void __user *)data.sepol2,
-			       sizeof(tgt_buf), &t) < 0) {
+		if (get_object(tgt_buf, sepol2, sizeof(tgt_buf), &t) < 0) {
 			pr_err("sepol: copy tgt failed.\n");
 			goto exit;
 		}
-		if (get_object(cls_buf, (void __user *)data.sepol3,
-			       sizeof(cls_buf), &c) < 0) {
+		if (get_object(cls_buf, sepol3, sizeof(cls_buf), &c) < 0) {
 			pr_err("sepol: copy cls failed.\n");
 			goto exit;
 		}
-		if (strncpy_from_user(operation, (void __user *)data.sepol4,
-				      sizeof(operation)) < 0) {
+		if (strncpy_from_user(operation, sepol4, sizeof(operation)) <
+		    0) {
 			pr_err("sepol: copy operation failed.\n");
 			goto exit;
 		}
-		if (strncpy_from_user(perm_set, (void __user *)data.sepol5,
-				      sizeof(perm_set)) < 0) {
+		if (strncpy_from_user(perm_set, sepol5, sizeof(perm_set)) < 0) {
 			pr_err("sepol: copy perm_set failed.\n");
 			goto exit;
 		}
@@ -356,14 +372,11 @@ int handle_sepolicy(unsigned long arg3, void __user *arg4)
 		} else {
 			pr_err("sepol: unknown subcmd: %d\n", subcmd);
 		}
-		ret = success ? 0 : -EINVAL;
-		break;
-	}
-	case CMD_TYPE_STATE: {
+		ret = success ? 0 : -1;
+	} else if (cmd == CMD_TYPE_STATE) {
 		char src[MAX_SEPOL_LEN];
 
-		if (strncpy_from_user(src, (void __user *)data.sepol1,
-				      sizeof(src)) < 0) {
+		if (strncpy_from_user(src, sepol1, sizeof(src)) < 0) {
 			pr_err("sepol: copy src failed.\n");
 			goto exit;
 		}
@@ -378,20 +391,16 @@ int handle_sepolicy(unsigned long arg3, void __user *arg4)
 		}
 		if (success)
 			ret = 0;
-		break;
-	}
-	case CMD_TYPE:
-	case CMD_TYPE_ATTR: {
+
+	} else if (cmd == CMD_TYPE || cmd == CMD_TYPE_ATTR) {
 		char type[MAX_SEPOL_LEN];
 		char attr[MAX_SEPOL_LEN];
 
-		if (strncpy_from_user(type, (void __user *)data.sepol1,
-				      sizeof(type)) < 0) {
+		if (strncpy_from_user(type, sepol1, sizeof(type)) < 0) {
 			pr_err("sepol: copy type failed.\n");
 			goto exit;
 		}
-		if (strncpy_from_user(attr, (void __user *)data.sepol2,
-				      sizeof(attr)) < 0) {
+		if (strncpy_from_user(attr, sepol2, sizeof(attr)) < 0) {
 			pr_err("sepol: copy attr failed.\n");
 			goto exit;
 		}
@@ -407,13 +416,11 @@ int handle_sepolicy(unsigned long arg3, void __user *arg4)
 			goto exit;
 		}
 		ret = 0;
-		break;
-	}
-	case CMD_ATTR: {
+
+	} else if (cmd == CMD_ATTR) {
 		char attr[MAX_SEPOL_LEN];
 
-		if (strncpy_from_user(attr, (void __user *)data.sepol1,
-				      sizeof(attr)) < 0) {
+		if (strncpy_from_user(attr, sepol1, sizeof(attr)) < 0) {
 			pr_err("sepol: copy attr failed.\n");
 			goto exit;
 		}
@@ -422,42 +429,37 @@ int handle_sepolicy(unsigned long arg3, void __user *arg4)
 			goto exit;
 		}
 		ret = 0;
-		break;
-	}
-	case CMD_TYPE_TRANSITION: {
+
+	} else if (cmd == CMD_TYPE_TRANSITION) {
 		char src[MAX_SEPOL_LEN];
 		char tgt[MAX_SEPOL_LEN];
 		char cls[MAX_SEPOL_LEN];
 		char default_type[MAX_SEPOL_LEN];
 		char object[MAX_SEPOL_LEN];
 
-		if (strncpy_from_user(src, (void __user *)data.sepol1,
-				      sizeof(src)) < 0) {
+		if (strncpy_from_user(src, sepol1, sizeof(src)) < 0) {
 			pr_err("sepol: copy src failed.\n");
 			goto exit;
 		}
-		if (strncpy_from_user(tgt, (void __user *)data.sepol2,
-				      sizeof(tgt)) < 0) {
+		if (strncpy_from_user(tgt, sepol2, sizeof(tgt)) < 0) {
 			pr_err("sepol: copy tgt failed.\n");
 			goto exit;
 		}
-		if (strncpy_from_user(cls, (void __user *)data.sepol3,
-				      sizeof(cls)) < 0) {
+		if (strncpy_from_user(cls, sepol3, sizeof(cls)) < 0) {
 			pr_err("sepol: copy cls failed.\n");
 			goto exit;
 		}
-		if (strncpy_from_user(default_type, (void __user *)data.sepol4,
+		if (strncpy_from_user(default_type, sepol4,
 				      sizeof(default_type)) < 0) {
 			pr_err("sepol: copy default_type failed.\n");
 			goto exit;
 		}
 		char *real_object;
-		if ((void __user *)data.sepol5 == NULL) {
+		if (sepol5 == NULL) {
 			real_object = NULL;
 		} else {
-			if (strncpy_from_user(object,
-					      (void __user *)data.sepol5,
-					      sizeof(object)) < 0) {
+			if (strncpy_from_user(object, sepol5, sizeof(object)) <
+			    0) {
 				pr_err("sepol: copy object failed.\n");
 				goto exit;
 			}
@@ -468,30 +470,26 @@ int handle_sepolicy(unsigned long arg3, void __user *arg4)
 						   default_type, real_object);
 		if (success)
 			ret = 0;
-		break;
-	}
-	case CMD_TYPE_CHANGE: {
+
+	} else if (cmd == CMD_TYPE_CHANGE) {
 		char src[MAX_SEPOL_LEN];
 		char tgt[MAX_SEPOL_LEN];
 		char cls[MAX_SEPOL_LEN];
 		char default_type[MAX_SEPOL_LEN];
 
-		if (strncpy_from_user(src, (void __user *)data.sepol1,
-				      sizeof(src)) < 0) {
+		if (strncpy_from_user(src, sepol1, sizeof(src)) < 0) {
 			pr_err("sepol: copy src failed.\n");
 			goto exit;
 		}
-		if (strncpy_from_user(tgt, (void __user *)data.sepol2,
-				      sizeof(tgt)) < 0) {
+		if (strncpy_from_user(tgt, sepol2, sizeof(tgt)) < 0) {
 			pr_err("sepol: copy tgt failed.\n");
 			goto exit;
 		}
-		if (strncpy_from_user(cls, (void __user *)data.sepol3,
-				      sizeof(cls)) < 0) {
+		if (strncpy_from_user(cls, sepol3, sizeof(cls)) < 0) {
 			pr_err("sepol: copy cls failed.\n");
 			goto exit;
 		}
-		if (strncpy_from_user(default_type, (void __user *)data.sepol4,
+		if (strncpy_from_user(default_type, sepol4,
 				      sizeof(default_type)) < 0) {
 			pr_err("sepol: copy default_type failed.\n");
 			goto exit;
@@ -508,24 +506,19 @@ int handle_sepolicy(unsigned long arg3, void __user *arg4)
 		}
 		if (success)
 			ret = 0;
-		break;
-	}
-	case CMD_GENFSCON: {
+	} else if (cmd == CMD_GENFSCON) {
 		char name[MAX_SEPOL_LEN];
 		char path[MAX_SEPOL_LEN];
 		char context[MAX_SEPOL_LEN];
-		if (strncpy_from_user(name, (void __user *)data.sepol1,
-				      sizeof(name)) < 0) {
+		if (strncpy_from_user(name, sepol1, sizeof(name)) < 0) {
 			pr_err("sepol: copy name failed.\n");
 			goto exit;
 		}
-		if (strncpy_from_user(path, (void __user *)data.sepol2,
-				      sizeof(path)) < 0) {
+		if (strncpy_from_user(path, sepol2, sizeof(path)) < 0) {
 			pr_err("sepol: copy path failed.\n");
 			goto exit;
 		}
-		if (strncpy_from_user(context, (void __user *)data.sepol3,
-				      sizeof(context)) < 0) {
+		if (strncpy_from_user(context, sepol3, sizeof(context)) < 0) {
 			pr_err("sepol: copy context failed.\n");
 			goto exit;
 		}
@@ -535,12 +528,8 @@ int handle_sepolicy(unsigned long arg3, void __user *arg4)
 			goto exit;
 		}
 		ret = 0;
-		break;
-	}
-	default: {
+	} else {
 		pr_err("sepol: unknown cmd: %d\n", cmd);
-		break;
-	}
 	}
 
 exit:

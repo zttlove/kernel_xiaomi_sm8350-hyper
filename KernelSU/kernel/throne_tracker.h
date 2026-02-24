@@ -5,6 +5,6 @@ void ksu_throne_tracker_init(void);
 
 void ksu_throne_tracker_exit(void);
 
-void track_throne(bool prune_only);
+void ksu_track_throne(void);
 
 #endif
